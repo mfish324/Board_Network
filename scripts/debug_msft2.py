@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import sys, re
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from data.sec_collector import SECCollector
 from bs4 import BeautifulSoup

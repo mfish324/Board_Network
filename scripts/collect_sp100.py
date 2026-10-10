@@ -7,8 +7,8 @@ import sys
 from pathlib import Path
 from datetime import datetime
 
-# Add current directory to path
-sys.path.insert(0, str(Path(__file__).parent))
+# Add project root to path
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from data.sec_collector import SECCollector
 from config import OUTPUT_DIR
