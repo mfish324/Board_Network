@@ -11,9 +11,6 @@ from typing import List, Optional, Union
 from datetime import datetime, timedelta
 import warnings
 
-import sys
-from pathlib import Path
-sys.path.append(str(Path(__file__).parent.parent))
 from config import BENCHMARK_TICKER
 
 

@@ -13,9 +13,6 @@ from typing import Optional, List, Tuple
 import plotly.graph_objects as go
 import plotly.express as px
 
-import sys
-from pathlib import Path
-sys.path.append(str(Path(__file__).parent.parent))
 from config import FIGURE_SIZE, DPI
 from network.network_builder import BoardNetwork
 

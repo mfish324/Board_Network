@@ -104,7 +104,10 @@ class BoardNetwork:
         Returns:
             NetworkX graph of company-company connections
         """
-        if weighted:
+        if not self.companies:
+            # networkx rejects empty projections; an empty network has none
+            self.company_network = nx.Graph()
+        elif weighted:
             # Create weighted projection
             self.company_network = bipartite.weighted_projected_graph(
                 self.bipartite_graph,

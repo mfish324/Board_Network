@@ -11,11 +11,8 @@ import numpy as np
 from typing import Dict, Optional
 import warnings
 
-import sys
-from pathlib import Path
-sys.path.append(str(Path(__file__).parent.parent))
 from config import EIGENVECTOR_MAX_ITER, EIGENVECTOR_TOLERANCE, NUM_QUINTILES
-from network.network_builder import BoardNetwork
+from .network_builder import BoardNetwork
 
 
 class CentralityCalculator:
@@ -44,7 +41,7 @@ class CentralityCalculator:
             self.network.project_to_company_network()
 
         self.company_network = self.network.company_network
-        self.centrality_scores = {}
+        self.centrality_scores = None
 
     def calculate_degree_centrality(self) -> Dict[str, float]:
         """
@@ -159,13 +156,14 @@ class CentralityCalculator:
             df['closeness_centrality_norm']
         ) / 4
 
-        # Assign quintiles based on N-Score (5 = most central)
-        df['n_score_quintile'] = pd.qcut(
-            df['n_score'],
-            q=NUM_QUINTILES,
-            labels=range(1, NUM_QUINTILES + 1),
-            duplicates='drop'
-        )
+        # Assign quintiles based on N-Score (5 = most central). Rank with
+        # method='first' so ties and small samples still fill every bin.
+        n = len(df)
+        if n > 0:
+            ranks = df['n_score'].rank(method='first')
+            df['n_score_quintile'] = np.ceil(
+                ranks * NUM_QUINTILES / n
+            ).astype(int).clip(1, NUM_QUINTILES)
 
         # Add network statistics
         df['num_directors'] = df['company_id'].apply(
@@ -192,7 +190,7 @@ class CentralityCalculator:
         Returns:
             DataFrame with top N companies
         """
-        if not self.centrality_scores or len(self.centrality_scores) == 0:
+        if self.centrality_scores is None:
             self.centrality_scores = self.calculate_all_centralities()
 
         df = self.centrality_scores.copy()
@@ -208,7 +206,7 @@ class CentralityCalculator:
         Returns:
             DataFrame with companies in the quintile
         """
-        if not self.centrality_scores or len(self.centrality_scores) == 0:
+        if self.centrality_scores is None:
             self.centrality_scores = self.calculate_all_centralities()
 
         df = self.centrality_scores.copy()
@@ -221,7 +219,7 @@ class CentralityCalculator:
         Args:
             filepath: Path to output CSV file
         """
-        if not self.centrality_scores or len(self.centrality_scores) == 0:
+        if self.centrality_scores is None:
             self.centrality_scores = self.calculate_all_centralities()
 
         self.centrality_scores.to_csv(filepath, index=False)

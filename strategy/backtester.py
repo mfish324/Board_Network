@@ -12,14 +12,11 @@ from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
 import warnings
 
-import sys
-from pathlib import Path
-sys.path.append(str(Path(__file__).parent.parent))
 from config import (
     REBALANCE_MONTH, REBALANCE_DAY, RISK_FREE_RATE,
     TRANSACTION_COST_BPS
 )
-from strategy.stock_data import (
+from .stock_data import (
     StockDataFetcher, calculate_annualized_return,
     calculate_annualized_volatility, calculate_sharpe_ratio,
     calculate_max_drawdown

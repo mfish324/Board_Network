@@ -15,8 +15,6 @@ from bs4 import BeautifulSoup
 from tqdm import tqdm
 import pandas as pd
 
-import sys
-sys.path.append(str(Path(__file__).parent.parent))
 from config import (
     SEC_BASE_URL, SEC_ARCHIVE_URL, SEC_SUBMISSIONS_URL,
     SEC_COMPANY_TICKERS_URL, SEC_RATE_LIMIT_DELAY, SEC_USER_AGENT,

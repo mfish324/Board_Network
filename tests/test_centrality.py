@@ -5,11 +5,6 @@ Tests for centrality calculation module.
 import pytest
 import pandas as pd
 import numpy as np
-import sys
-from pathlib import Path
-
-# Add parent directory to path
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from network.network_builder import BoardNetwork
 from network.centrality import CentralityCalculator, calculate_centrality

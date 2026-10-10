@@ -155,8 +155,10 @@ class NameStandardizer:
         # Remove parenthetical content (e.g., ages, birth years)
         name = re.sub(r'\([^)]*\)', '', name)
 
-        # Remove quotes around nicknames
-        name = re.sub(r'["\']', '', name)
+        # Remove quotes around nicknames, but keep apostrophes inside
+        # names (O'Brien, D'Angelo)
+        name = name.replace('"', '')
+        name = re.sub(r"(?<![^\W\d_])'|'(?![^\W\d_])", '', name)
 
         # Convert to lowercase for processing
         name_lower = name.lower()
@@ -235,11 +237,10 @@ class NameStandardizer:
             # Capitalize first part normally, second part always uppercase first letter
             return f"{parts[0].capitalize()}'{parts[1].capitalize()}"
 
-        # Handle names starting with Mc or Mac
+        # Handle names starting with Mc. "Mac" is deliberately not special-cased:
+        # it is ambiguous (Macdonald vs. Macy, Mace) and would split matches.
         if part.startswith('mc') and len(part) > 2:
             return 'Mc' + part[2:].capitalize()
-        if part.startswith('mac') and len(part) > 3:
-            return 'Mac' + part[3:].capitalize()
 
         # Standard capitalization
         return part.capitalize()
