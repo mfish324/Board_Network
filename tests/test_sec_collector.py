@@ -177,3 +177,49 @@ class TestFindProxyFilings:
 
         assert [f["accession_number"] for f in filings] == ["proxy-2024"]
         assert fetched == []
+
+
+class TestCollectBoardData:
+    def _collector(self, tmp_path, monkeypatch, filings):
+        collector = SECCollector(cache_dir=tmp_path)
+        collector.ticker_to_cik_map = {"ABC": "0000000001"}
+        monkeypatch.setattr(collector, "load_ticker_to_cik_map", lambda *a, **k: {})
+        monkeypatch.setattr(collector, "find_proxy_filings", lambda cik, year: filings)
+        downloaded = []
+
+        def fake_download(cik, accession_number, document):
+            downloaded.append(accession_number)
+            return _doc(
+                "<p>Herb Allen</p><p>Director since: 2021</p>"
+                "<p>Allen is a director. Allen again. Allen joined.</p>"
+                + _table_mentions("Herb Allen")
+            )
+
+        monkeypatch.setattr(collector, "download_filing", fake_download)
+        return collector, downloaded
+
+    @staticmethod
+    def _filing(form, acc):
+        return {"form": form, "filing_date": "2023-04-01",
+                "accession_number": acc, "primary_document": f"{acc}.htm",
+                "cik": "0000000001"}
+
+    def test_defa14a_only_is_skipped(self, tmp_path, monkeypatch, capsys):
+        collector, downloaded = self._collector(
+            tmp_path, monkeypatch, [self._filing("DEFA14A", "supp-1")])
+
+        df = collector.collect_board_data(["ABC"], 2023, verbose=True)
+
+        assert df.empty
+        assert downloaded == []
+        assert "No DEF 14A" in capsys.readouterr().out
+
+    def test_def14a_preferred_over_defa14a(self, tmp_path, monkeypatch):
+        collector, downloaded = self._collector(
+            tmp_path, monkeypatch,
+            [self._filing("DEFA14A", "supp-1"), self._filing("DEF 14A", "proxy-1")])
+
+        df = collector.collect_board_data(["ABC"], 2023, verbose=False)
+
+        assert downloaded == ["proxy-1"]
+        assert list(df["director_name"]) == ["Herb Allen"]

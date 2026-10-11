@@ -469,9 +469,17 @@ class SECCollector:
                         print(f"Warning: No proxy filings found for {ticker} in {year}")
                     continue
 
-                # Prefer DEF 14A over amendments (DEFA14A)
+                # Only the definitive proxy carries the nominee cards. DEFA14A
+                # is supplemental material (press releases, vote reminders)
+                # and yields junk names, so never fall back to it.
                 def_14a_filings = [f for f in filings if f['form'] == 'DEF 14A']
-                filing = def_14a_filings[0] if def_14a_filings else filings[0]
+                if not def_14a_filings:
+                    if verbose:
+                        forms = sorted({f['form'] for f in filings})
+                        print(f"Warning: No DEF 14A for {ticker} in {year} "
+                              f"(found only: {', '.join(forms)})")
+                    continue
+                filing = def_14a_filings[0]
 
                 # Download filing
                 html = self.download_filing(
