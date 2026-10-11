@@ -6,6 +6,7 @@ Collects board composition data from proxy statements (DEF 14A filings).
 
 import json
 import re
+from collections import Counter
 import time
 from pathlib import Path
 from typing import List, Dict, Optional, Set
@@ -21,6 +22,61 @@ from config import (
     PROXY_FILING_TYPES, DATA_DIR
 )
 from network.name_standardizer import NameStandardizer
+
+INLINE_TAGS = ['span', 'b', 'i', 'u', 'em', 'strong', 'a', 'font', 'sup', 'sub']
+
+DIRECTOR_SINCE_RE = re.compile(
+    r'\b(?:director|board\s+member|trustee)\s*:?\s*since\b', re.IGNORECASE)
+ELECTION_LIST_RE = re.compile(
+    r'Election of Directors?:\s*([A-Z][^.:]{10,400}?)(?=\s+FOR\b|\s{2,}|[.:]|$)')
+AGE_SUFFIX_RE = re.compile(r'\s*[,|]\s*(?:age\s*)?\d{2}\s*$', re.IGNORECASE)
+LEADING_JUNK_RE = re.compile(r'^[^A-Za-zÀ-ſ]+')
+ANCHOR_WINDOW = 12  # lines either side of a "Director since" marker
+
+NAME_TOKEN_RE = re.compile(
+    r"^(?:[A-Z]\.|[A-Z][A-Za-zÀ-ſ'’\-]*[a-zß-ſ]\.?)$")
+NAME_PARTICLES = {'de', 'del', 'la', 'van', 'von', 'der', 'den', 'bin', 'al',
+                  'ter', 'du', 'di', 'da', 'le'}
+CREDENTIALS = {'dvm', 'dmd', 'cfa', 'llb', 'mbbs', 'kbe', 'rn', 'frcp', 'phd', 'md', 'mph', 'mba', 'jd', 'cpa', 'cbe', 'obe', 'jr',
+               'sr', 'ii', 'iii', 'iv', 'dds', 'esq', 'frs', 'dphil', 'msc',
+               'ma', 'ms', 'ba', 'bs', 'dba', 'usn', 'ret', 'usaf'}
+NAME_STOPWORDS = {
+    'board', 'committee', 'committees', 'director', 'directors', 'independent',
+    'chair', 'chairman', 'chairperson', 'lead', 'company', 'corporation',
+    'inc', 'corp', 'proxy', 'statement', 'meeting', 'annual', 'compensation',
+    'audit', 'governance', 'corporate', 'executive', 'officer', 'officers',
+    'skills', 'experience', 'biography', 'background', 'career', 'highlights',
+    'age', 'since', 'table', 'contents', 'nominee', 'nominees', 'shareholder',
+    'shareholders', 'stockholder', 'stockholders', 'proposal', 'vote',
+    'election', 'elected', 'overview', 'summary', 'information', 'principal',
+    'occupation', 'primary', 'public', 'other', 'current', 'key',
+    'qualifications', 'expertise', 'finance', 'financial', 'risk', 'strategy',
+    'leadership', 'international', 'technology', 'operations', 'business',
+    'industry', 'sustainability', 'responsibility', 'nominating', 'human',
+    'capital', 'management', 'member', 'members', 'president', 'chief', 'vice',
+    'senior', 'general', 'counsel', 'secretary', 'treasurer', 'united',
+    'states', 'new', 'york', 'of', 'the', 'and', 'for', 'to', 'in', 'on', 'at',
+    'by', 'our', 'we', 'ltd', 'llc', 'plc', 'group', 'holdings', 'partners',
+    'university', 'college', 'school', 'institute', 'foundation', 'council',
+    'bank', 'trust', 'fund', 'securities', 'exchange', 'commission', 'form',
+    'item', 'part', 'page', 'notice', 'internal', 'revenue', 'service',
+    'retired', 'former', 'emeritus', 'non', 'employee', 'tenure', 'attendance',
+    'gender', 'diversity', 'ethnic', 'race', 'name', 'title', 'year', 'years',
+    'fees', 'total', 'stock', 'awards', 'option', 'options', 'cash',
+    'level', 'high', 'petroleum', 'recent', 'past', 'special', 'consumer',
+    'health', 'pharmaceutical', 'chemical', 'engineering', 'energy',
+    'investments', 'strategic', 'planning', 'sachs', 'goldman', 'lockheed', 'thermo', 'fisher', 'scientific', 'palo', 'alto',
+    # organizations / places / headings that appear in nominee bios
+    'collective', 'street', 'airlines', 'affiliation', 'affiliations',
+    'networks', 'southern', 'northern', 'eastern', 'western', 'california',
+    'selected', 'directorships', 'advisers', 'advisors', 'institution',
+    'laboratories', 'systems', 'technologies', 'pharmaceuticals',
+    'communications', 'industries', 'enterprises', 'international',
+    'associates', 'ventures', 'resources', 'services', 'solutions',
+    'department', 'ministry', 'american', 'national', 'global', 'world',
+    'society', 'association', 'center', 'centre', 'hospital', 'museum',
+    'professor', 'dean', 'partner', 'founder', 'co', 'inc.', 'corp.',
+}
 
 
 class SECCollector:
@@ -50,7 +106,10 @@ class SECCollector:
         self.rate_limit_delay = SEC_RATE_LIMIT_DELAY
         self.last_request_time = 0
 
-        self.name_standardizer = NameStandardizer()
+        # Match directors on first + last name only: filings disagree about
+        # middle initials ("Timothy P. Flynn" vs "Tim Flynn"), which would
+        # otherwise hide real interlocks and duplicate people within a board.
+        self.name_standardizer = NameStandardizer(normalize_middle=False)
         self.ticker_to_cik_map = None
 
     def _rate_limit(self):
@@ -156,25 +215,35 @@ class SECCollector:
             List of filing dicts with keys: form, filing_date, accession_number, primary_document
         """
         filings_data = self.get_company_filings(cik)
+        filings_block = filings_data.get('filings', {})
 
-        # Extract recent filings
-        recent = filings_data.get('filings', {}).get('recent', {})
-        forms = recent.get('form', [])
-        filing_dates = recent.get('filingDate', [])
-        accession_numbers = recent.get('accessionNumber', [])
-        primary_documents = recent.get('primaryDocument', [])
+        # The "recent" block only holds the latest ~1000 filings; high-volume
+        # filers (e.g. JPM) push older proxies into paginated archive files.
+        blocks = [filings_block.get('recent', {})]
+        for archive in filings_block.get('files', []):
+            if year is not None:
+                first = str(archive.get('filingFrom', ''))[:4]
+                last = str(archive.get('filingTo', ''))[:4]
+                if first.isdigit() and last.isdigit() and not (
+                        int(first) <= year <= int(last)):
+                    continue
+            url = f"{SEC_SUBMISSIONS_URL}/{archive['name']}"
+            blocks.append(self._make_request(url).json())
 
-        # Filter for proxy statements
         proxy_filings = []
-        for i, form in enumerate(forms):
-            if form in PROXY_FILING_TYPES:
+        for block in blocks:
+            forms = block.get('form', [])
+            filing_dates = block.get('filingDate', [])
+            accession_numbers = block.get('accessionNumber', [])
+            primary_documents = block.get('primaryDocument', [])
+
+            for i, form in enumerate(forms):
+                if form not in PROXY_FILING_TYPES:
+                    continue
                 filing_date = filing_dates[i]
 
-                # Filter by year if specified
-                if year is not None:
-                    filing_year = int(filing_date.split('-')[0])
-                    if filing_year != year:
-                        continue
+                if year is not None and int(filing_date.split('-')[0]) != year:
+                    continue
 
                 proxy_filings.append({
                     'form': form,
@@ -211,7 +280,11 @@ class SECCollector:
         url = f"{SEC_ARCHIVE_URL}/{int(cik)}/{accession_no_dash}/{document}"
 
         response = self._make_request(url)
-        content = response.text
+        raw = response.content
+        try:
+            content = raw.decode('utf-8')
+        except UnicodeDecodeError:
+            content = raw.decode('cp1252', errors='replace')
 
         # Cache the content
         cache_file.write_text(content, encoding='utf-8')
@@ -222,141 +295,140 @@ class SECCollector:
         """
         Extract director names from a proxy statement HTML.
 
+        Director nominee cards in proxy statements share one signal: a
+        "Director since <year>" marker next to the nominee's name. The layout
+        varies (name before or after the marker), so every standalone
+        name-like line within a few lines of a marker is taken as a director.
+        A comma-separated "Election of Directors: A, B and C" list (Apple
+        style) is also recognised.
+
         Args:
             html_content: HTML content of proxy statement
 
         Returns:
             Set of standardized director names
         """
+        # An XML declaration makes lxml's HTML parser warn on XHTML filings
+        html_content = re.sub(r'^\s*<\?xml[^>]*\?>', '', html_content)
         soup = BeautifulSoup(html_content, 'lxml')
+        for tag in soup(["script", "style"]):
+            tag.decompose()
+        for tag in soup.find_all(INLINE_TAGS):
+            tag.unwrap()
+        soup.smooth()
 
-        # Remove script and style elements
-        for script in soup(["script", "style"]):
-            script.decompose()
+        text = soup.get_text('\n')
+        text = re.sub(r'[\xa0\u2000-\u200b\u202f\u3000]+', ' ', text)
+        # Strip leading bullets/symbols so "• Herb Allen" reads as a name
+        lines = [LEADING_JUNK_RE.sub('', ln).strip() for ln in text.split('\n')]
+        lines = [ln for ln in lines if ln]
 
-        # Get text
-        text = soup.get_text()
+        raw_names = set()
+        list_names = set()
 
-        # Find director section
+        # Signal 1: nominee cards anchored on "Director since"
+        anchors = [i for i, ln in enumerate(lines)
+                   if len(ln) < 120 and DIRECTOR_SINCE_RE.search(ln)]
+        name_at = {i: self._line_to_name(ln) for i, ln in enumerate(lines)}
+        for i in anchors:
+            lo = max(0, i - ANCHOR_WINDOW)
+            hi = min(len(lines), i + ANCHOR_WINDOW + 1)
+            for j in range(lo, hi):
+                if name_at.get(j):
+                    raw_names.add(name_at[j])
+
+        # Signal 2: "Election of Directors: A, B, and C"
+        joined = ' '.join(lines)
+        for match in ELECTION_LIST_RE.findall(joined):
+            match = re.split(r'\s+FOR\b', match)[0]
+            for name in re.split(r',\s*(?:and\s+)?|\s+and\s+', match):
+                name = self._line_to_name(name.strip())
+                if name:
+                    list_names.add(name)
+
+        # A real director is mentioned repeatedly (card, bio, committee and
+        # compensation tables); one-off name-like strings are usually
+        # organizations or places from a nominee's bio. Match on surname
+        # because bios say "Dr. Beckerle".
+        def _mentions(name: str) -> int:
+            surname = re.escape(name.split()[-1].strip('.'))
+            return len(re.findall(r'\b' + surname + r'\b', joined))
+        raw_names = {n for n in raw_names if _mentions(n) >= 3}
+
+        # Directors also show up as standalone lines in committee and
+        # compensation tables; organizations in bios mostly appear inside
+        # sentences, so require at least two standalone-line mentions.
+        # A name sitting right next to a marker is the card heading itself
+        # and is accepted on a single mention.
+        standalone = Counter(v for v in name_at.values() if v)
+        near_anchor = {
+            name_at[j]
+            for i in anchors
+            for j in range(max(0, i - 3), min(len(lines), i + 4))
+            if name_at.get(j)
+        }
+        raw_names = {n for n in raw_names
+                     if standalone[n] >= 2 or n in near_anchor}
+
+        # Drop "D. Adamczyk" when "Darius Adamczyk" was also found
+        full_names = {n for n in raw_names if not re.match(r'^[A-Z]\.\s', n)
+                      or len(n.split()) > 2}
+        raw_names = {
+            n for n in raw_names
+            if n in full_names or not any(
+                f.split()[-1] == n.split()[-1] and f.split()[0].startswith(n[0])
+                for f in full_names)
+        }
+
         directors = set()
-
-        # Pattern 1: Look for comma-separated list after "Election of Directors:"
-        # Example: "Election of Directors: James Bell, Tim Cook, Al Gore, and Sue Wagner"
-        comma_list_pattern = re.compile(
-            r'Election of Directors?:\s*([A-Z][^.]+?)(?:\s+and\s+|\s*$)',
-            re.IGNORECASE | re.MULTILINE
-        )
-
-        comma_matches = comma_list_pattern.findall(text)
-        for match in comma_matches:
-            # Split by commas and 'and'
-            names = re.split(r',\s*(?:and\s+)?|,?\s+and\s+', match)
-            for name in names:
-                name = name.strip()
-                # Remove trailing text like "is independent" or descriptions
-                name = re.sub(r'\s+(?:is|are|serve|serves|serving).*$', '', name, flags=re.IGNORECASE)
-                # Only process if it looks like a name (2-4 words, capitalized)
-                if re.match(r'^[A-Z][a-z]+(?:\s+[A-Z]\.?\s*)?(?:\s+[A-Z][a-z]+){1,2}$', name):
-                    standardized = self.name_standardizer.standardize(name)
-                    if standardized:
-                        directors.add(standardized)
-
-        # Pattern 2: Look for "Election of Directors", "Elect directors", or similar section
-        director_section_pattern = re.compile(
-            r'(?:elect(?:ion)?\s+(?:of|the)?\s*\d*\s*director|director nominees|board of directors|our directors|proposal 1.*director)',
-            re.IGNORECASE
-        )
-
-        # Find section
-        lines = text.split('\n')
-        in_director_section = False
-        section_lines = []
-
-        for i, line in enumerate(lines):
-            line = line.strip()
-
-            # Check if we're entering director section
-            if director_section_pattern.search(line):
-                in_director_section = True
-
-            # Check if we're leaving director section (common markers)
-            if in_director_section and re.search(
-                r'(?:executive compensation|audit committee|proposal 2|ratification|advisory vote)',
-                line,
-                re.IGNORECASE
-            ):
-                break
-
-            if in_director_section:
-                section_lines.append(line)
-
-            # Limit section size to avoid false positives
-            if len(section_lines) > 500:
-                break
-
-        # Extract names from section
-        section_text = '\n'.join(section_lines)
-
-        # Pattern 3: Name followed by age or year
-        # Examples: "John Smith, 55" or "John Smith (55)" or "John Smith, age 55"
-        name_age_pattern = re.compile(
-            r'([A-Z][a-z]+(?:\s+[A-Z]\.?)?\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s*[,\(]\s*(?:age\s*)?(\d{2})',
-            re.MULTILINE
-        )
-
-        matches = name_age_pattern.findall(section_text)
-        for name, age in matches:
-            # Validate age is reasonable (30-95)
-            if 30 <= int(age) <= 95:
-                standardized = self.name_standardizer.standardize(name)
-                if standardized:
-                    directors.add(standardized)
-
-        # Pattern 3b: Name followed by title
-        # Examples: "John Smith, Chairman" or "John Smith Chief Executive Officer"
-        name_title_pattern = re.compile(
-            r'([A-Z][a-z]+(?:\s+[A-Z]\.?\s*)?[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s*[,\n]\s*(?:Chairman|Chief|Director|President|CEO|CFO|Independent)',
-            re.MULTILINE | re.IGNORECASE
-        )
-
-        matches2 = name_title_pattern.findall(section_text)
-        for name in matches2:
+        for name in raw_names | list_names:
             standardized = self.name_standardizer.standardize(name)
             if standardized:
                 directors.add(standardized)
-
-        # Pattern 4: Look for names in tables (common in proxy statements)
-        tables = soup.find_all('table')
-        for table in tables[:10]:  # Check first 10 tables
-            table_text = table.get_text()
-
-            # Check if this looks like a director table
-            if re.search(r'(?:director|name|age|independent)', table_text, re.IGNORECASE):
-                # Extract potential names from table cells
-                cells = table.find_all(['td', 'th'])
-                for cell in cells:
-                    cell_text = cell.get_text().strip()
-
-                    # Look for names (2-3 words, each capitalized)
-                    name_pattern = re.compile(r'^([A-Z][a-z]+(?:\s+[A-Z]\.?\s+)?[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)$')
-                    match = name_pattern.match(cell_text)
-                    if match:
-                        name = match.group(1)
-                        standardized = self.name_standardizer.standardize(name)
-                        if standardized:
-                            directors.add(standardized)
-
-        # Filter out common false positives
-        false_positives = {
-            'Annual Meeting', 'Board Of Directors', 'Chief Executive',
-            'Executive Officer', 'Corporate Governance', 'Audit Committee',
-            'Compensation Committee', 'Common Stock', 'Stock Exchange',
-            'United States', 'New York', 'Table Of Contents'
-        }
-
-        directors = {d for d in directors if d not in false_positives}
-
         return directors
+
+    @staticmethod
+    def _line_to_name(line: str) -> Optional[str]:
+        """Return the person name a line consists of, or None."""
+        if len(line) > 70 or len(line) < 5:
+            return None
+        # "David Solomon, 61" / "John B. Frank | 66": drop the trailing age
+        line = re.sub(AGE_SUFFIX_RE, '', line)
+        # "ARI BOUSBIB": cards sometimes set the name in capitals
+        if line.isupper():
+            line = line.title()
+        # Drop trailing credentials: "Susan Desmond-Hellmann, M.D., M.P.H."
+        head, *rest = [p.strip() for p in line.split(',')]
+        if rest and not all(
+                re.sub(r'[.\s]', '', r).lower() in CREDENTIALS for r in rest):
+            return None
+        tokens = head.split()
+        # Peel a trailing label off the name: an ALLCAPS word, a role word,
+        # or a possessive ("Intel's Chief Executive Officer").
+        for k in range(2, min(len(tokens), 5) + 1):
+            if k < len(tokens):
+                nxt = tokens[k]
+                if ((nxt.isupper() and len(nxt) >= 4)
+                        or nxt.lower().strip('.') in NAME_STOPWORDS
+                        or re.search(r"['’]s$", nxt)):
+                    if all(NAME_TOKEN_RE.match(t) or t.strip('.').lower() in NAME_PARTICLES
+                           for t in tokens[:k]):
+                        tokens = tokens[:k]
+                        break
+        if not 2 <= len(tokens) <= 5:
+            return None
+        for k, tok in enumerate(tokens):
+            bare = tok.strip('.').lower()
+            if bare in NAME_STOPWORDS or any(c.isdigit() for c in tok):
+                return None
+            if k > 0 and bare in NAME_PARTICLES:
+                continue
+            if not NAME_TOKEN_RE.match(tok):
+                return None
+        # Last token must be a real word, not an initial
+        if len(tokens[-1].strip('.')) < 2:
+            return None
+        return ' '.join(tokens)
 
     def collect_board_data(self,
                           tickers: List[str],

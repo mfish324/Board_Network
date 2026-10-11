@@ -185,6 +185,13 @@ class NameStandardizer:
         last = parts[-1]
         middle_parts = parts[1:-1] if len(parts) > 2 else []
 
+        # "L. John Doerr" goes by John: when the middle name is dropped,
+        # promote it over a leading initial so matches line up across filings.
+        if (not self.normalize_middle and len(first.rstrip('.')) == 1
+                and middle_parts and len(middle_parts[0].rstrip('.')) > 1):
+            first = middle_parts[0]
+            middle_parts = middle_parts[1:]
+
         # Expand nicknames in first name
         if self.expand_nicknames and first in NICKNAME_MAP:
             first = NICKNAME_MAP[first]
